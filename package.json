@@ -1,7 +1,7 @@
 {
   "name": "hird-note-backend",
   "version": "1.0.0",
-  "description": "Backend OTP & Auth pour Hird Note \u2014 D\u00e9ploiement Render.com",
+  "description": "Backend OTP & Auth pour Hird Note — Déploiement Render.com",
   "main": "server.js",
   "engines": {
     "node": ">=18.0.0"
@@ -21,7 +21,7 @@
     "jsonwebtoken": "^9.0.2",
     "uuid": "^9.0.0",
     "twilio": "^4.23.0",
-    "resend": "^3.2.0"
+    "resend": "2.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
