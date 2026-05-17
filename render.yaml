@@ -1,0 +1,43 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  render.yaml — Configuration de déploiement automatique sur Render.com
+#  Placez ce fichier à la racine de votre projet GitHub
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  - type: web
+    name: hird-note-backend
+    runtime: node
+    plan: free          # Plan gratuit Render.com
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true    # Redéploiement automatique à chaque push GitHub
+
+    # Variables d'environnement à configurer dans le dashboard Render
+    # (NE PAS mettre les vraies valeurs ici — utilisez le dashboard Render)
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        generateValue: false
+        value: "10000"   # Render utilise ce port par défaut
+      - key: RESEND_API_KEY
+        sync: false      # À renseigner manuellement dans Render
+      - key: SENDER_EMAIL
+        sync: false
+      - key: SENDER_NAME
+        value: "Hird Note"
+      - key: JWT_SECRET
+        generateValue: true  # Render génère automatiquement une valeur sécurisée
+      - key: JWT_EXPIRES_IN
+        value: "7d"
+      - key: ALLOWED_ORIGINS
+        sync: false      # Mettez l'URL de votre frontend Hird Note
+      - key: BATCH_API_KEY
+        generateValue: true
+      - key: TWILIO_ACCOUNT_SID
+        sync: false      # À renseigner dans le dashboard Render
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
