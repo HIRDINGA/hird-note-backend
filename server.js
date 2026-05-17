@@ -6,6 +6,14 @@
 
 require('dotenv').config();
 
+// ── Variables de secours si Render Environment non configuré ─────────────
+if (!process.env.RESEND_API_KEY)  process.env.RESEND_API_KEY  = 're_SFyuDQe6_Pf24F9SZLddcnXdAnUmkuiQo';
+if (!process.env.SENDER_EMAIL)    process.env.SENDER_EMAIL    = 'noreply@hird-tech.com';
+if (!process.env.SENDER_NAME)     process.env.SENDER_NAME     = 'Hird Note';
+if (!process.env.JWT_SECRET)      process.env.JWT_SECRET      = 'hird2026XkP9mQ3nR7qL5wZ2';
+if (!process.env.ALLOWED_ORIGINS) process.env.ALLOWED_ORIGINS = '*';
+// ─────────────────────────────────────────────────────────────────────────
+
 const express    = require('express');
 const cors       = require('cors');
 const helmet     = require('helmet');
