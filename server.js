@@ -185,7 +185,7 @@ app.post('/api/auth/verify-otp', verifyLimiter, (req, res) => {
     record.attempts++;
     if (record.attempts > 3) {
       otpCache.del(otpKey);
-      return res.status(429).json({ success: false, message: 'Trop de tentatives. Demandez un nouveau code.' });
+      return res.status(429).json({ success: false, message: "Trop de tentatives. Demandez un nouveau code." });
     }
     otpCache.set(otpKey, record);
 
@@ -237,7 +237,7 @@ app.post('/api/auth/register', async (req, res) => {
     try {
       decoded = jwt.verify(verificationToken, process.env.JWT_SECRET || 'hird-note-secret-change-me');
     } catch {
-      return res.status(401).json({ success: false, message: 'Token de vérification invalide ou expiré' });
+      return res.status(401).json({ success: false, message: "Token de vérification invalide ou expiré" });
     }
 
     if (!decoded.verified || decoded.purpose !== 'register') {
@@ -403,7 +403,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
     try {
       decoded = jwt.verify(verificationToken, process.env.JWT_SECRET || 'hird-note-secret-change-me');
     } catch {
-      return res.status(401).json({ success: false, message: 'Token expiré. Recommencez.' });
+      return res.status(401).json({ success: false, message: "Token expiré. Recommencez." });
     }
 
     if (!decoded.verified || decoded.purpose !== 'reset') {
@@ -500,7 +500,7 @@ app.post('/api/auth/send-sms-otp', otpLimiter, async (req, res) => {
 
   } catch (err) {
     console.error('[send-sms-otp]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur lors de l'envoi du SMS. Vérifiez le format du numéro.' });
+    res.status(500).json({ success: false, message: "Erreur lors de l'envoi du SMS. Vérifiez le format du numéro." });
   }
 });
 
@@ -522,13 +522,13 @@ app.post('/api/auth/verify-sms-otp', verifyLimiter, (req, res) => {
     const record = otpCache.get(otpKey);
 
     if (!record) {
-      return res.status(400).json({ success: false, message: 'Code expiré. Demandez un nouveau SMS.' });
+      return res.status(400).json({ success: false, message: "Code expiré. Demandez un nouveau SMS." });
     }
 
     record.attempts++;
     if (record.attempts > 3) {
       otpCache.del(otpKey);
-      return res.status(429).json({ success: false, message: 'Trop de tentatives. Demandez un nouveau code.' });
+      return res.status(429).json({ success: false, message: "Trop de tentatives. Demandez un nouveau code." });
     }
     otpCache.set(otpKey, record);
 
@@ -610,7 +610,7 @@ app.post('/api/reminders/send', async (req, res) => {
 
   } catch (err) {
     console.error('[reminders/send]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur lors de l'envoi du rappel' });
+    res.status(500).json({ success: false, message: "Erreur lors de l'envoi du rappel" });
   }
 });
 
@@ -622,7 +622,7 @@ app.post('/api/reminders/batch', async (req, res) => {
 
     // Vérification clé API simple pour sécuriser l'endpoint batch
     if (apiKey !== process.env.BATCH_API_KEY && process.env.BATCH_API_KEY) {
-      return res.status(401).json({ success: false, message: 'Clé API invalide' });
+      return res.status(401).json({ success: false, message: "Clé API invalide" });
     }
     if (!Array.isArray(tasks) || tasks.length === 0) {
       return res.status(400).json({ success: false, message: 'Liste de tâches requise' });
