@@ -6,7 +6,15 @@
 
 const { Resend } = require('resend');
 
-const resend = new Resend(process.env.RESEND_API_KEY || '');
+// Initialisation lazy — Resend v2 exige une clé valide au constructeur
+let _resend = null;
+function getResend() {
+  if (!_resend) {
+    if (!process.env.RESEND_API_KEY) return null;
+    _resend = new Resend(process.env.RESEND_API_KEY);
+  }
+  return _resend;
+}
 
 const SENDER_EMAIL = process.env.SENDER_EMAIL || 'noreply@hird-tech.com';
 const SENDER_NAME  = process.env.SENDER_NAME  || 'Hird Note';
@@ -162,7 +170,8 @@ function buildWelcomeEmailHTML(name) {
 //  Fonction centrale d'envoi via Resend
 // ═══════════════════════════════════════════════════════════════════════════
 async function _send({ to, toName, subject, html, text, tags }) {
-  if (!process.env.RESEND_API_KEY) {
+  const resend = getResend();
+  if (!resend) {
     console.log('\n  📧 [SIMULATION RESEND — ajoutez RESEND_API_KEY dans Render]');
     console.log(`  → À      : ${to}`);
     console.log(`  → Sujet  : ${subject}\n`);
