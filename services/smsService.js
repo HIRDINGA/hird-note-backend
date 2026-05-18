@@ -99,4 +99,50 @@ async function sendTaskReminderSMS({ phone, name, taskTitle, deadline, priority,
   return sendSMS(phone, body);
 }
 
-module.exports = { sendPhoneOTP, sendTaskReminderSMS, normalizePhone };
+
+// ══ WHATSAPP ═══════════════════════════════════════════════════════════════
+
+const WA_FROM = process.env.TWILIO_WHATSAPP_NUMBER
+  ? 'whatsapp:' + process.env.TWILIO_WHATSAPP_NUMBER
+  : 'whatsapp:+14155238886'; // Numéro sandbox Twilio par défaut
+
+async function sendWhatsApp(to, body) {
+  const waTo = to.startsWith('whatsapp:') ? to : 'whatsapp:' + to;
+  if (!twilioClient) {
+    console.log('\n  💬 [SIMULATION WHATSAPP]');
+    console.log('  → Destinataire : ' + waTo);
+    console.log('  → Message      : ' + body + '\n');
+    return { sid: 'wa_sim_' + Date.now(), to: waTo };
+  }
+  const msg = await twilioClient.messages.create({ body, from: WA_FROM, to: waTo });
+  console.log('  💬 WhatsApp envoyé à ' + waTo + ' — SID: ' + msg.sid);
+  return msg;
+}
+
+async function sendWhatsAppOTP(phone, name, otp) {
+  const body =
+    '💬 *Hird Note* — Vérification\n\n' +
+    'Bonjour ' + name + ',\n\n' +
+    'Votre code de vérification :\n\n' +
+    '*' + otp + '*\n\n' +
+    '⏱ Valable 10 minutes.\n' +
+    'Ne partagez pas ce code.\n\n' +
+    '— Hird Note by Hird-Tech';
+  return sendWhatsApp(phone, body);
+}
+
+async function sendWhatsAppReminder({ phone, name, taskTitle, deadline, priority, progress }) {
+  const prioEmoji = { haute: '🔥', moyenne: '🟡', basse: '🟢' }[priority] || '📋';
+  const statusTxt = progress >= 100 ? '✅ Terminé' : progress > 0 ? '⏳ ' + progress + '% réalisé' : '○ Non commencé';
+  const body =
+    '⏰ *Rappel Hird Note*\n\n' +
+    'Bonjour ' + name + ',\n\n' +
+    '📌 *' + taskTitle + '*\n' +
+    '📅 Échéance : ' + deadline + '\n' +
+    prioEmoji + ' Priorité : ' + priority + '\n' +
+    statusTxt + '\n\n' +
+    '👉 Ouvrez Hird Note pour mettre à jour cette tâche.';
+  return sendWhatsApp(phone, body);
+}
+
+module.exports = { sendPhoneOTP, sendTaskReminderSMS, sendWhatsAppOTP, sendWhatsAppReminder, normalizePhone };
