@@ -569,6 +569,96 @@ app.post('/api/auth/verify-sms-otp', verifyLimiter, (req, res) => {
   }
 });
 
+
+// ══ WHATSAPP — OTP ET RAPPELS ════════════════════════════════════════════
+
+// ── POST /api/auth/send-whatsapp-otp ─────────────────────────────────────
+app.post('/api/auth/send-whatsapp-otp', otpLimiter, async (req, res) => {
+  try {
+    const { phone, name, code } = req.body;
+    if (!phone) return res.status(400).json({ success: false, message: "Numéro requis" });
+
+    const normalizedPhone = smsService.normalizePhone(phone);
+    if (!normalizedPhone) return res.status(400).json({ success: false, message: "Format de numéro invalide" });
+
+    const otp    = code || String(Math.floor(100000 + Math.random() * 900000));
+    const otpKey = 'wa_otp_' + normalizedPhone;
+    otpCache.set(otpKey, { otp, attempts: 0, createdAt: Date.now() });
+
+    // Envoyer via WhatsApp (Twilio sandbox)
+    await smsService.sendWhatsAppOTP(normalizedPhone, name || 'Utilisateur', otp);
+
+    res.json({ success: true, message: "Code WhatsApp envoyé au " + normalizedPhone, expiresIn: 600 });
+  } catch (err) {
+    console.error('[send-whatsapp-otp]', err.message);
+    res.status(500).json({ success: false, message: "Erreur lors de l'envoi WhatsApp" });
+  }
+});
+
+// ── POST /api/auth/verify-whatsapp-otp ───────────────────────────────────
+app.post('/api/auth/verify-whatsapp-otp', verifyLimiter, (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+    if (!phone || !otp) return res.status(400).json({ success: false, message: "Numéro et code requis" });
+    if (!validateOTP(otp)) return res.status(400).json({ success: false, message: "Code invalide (6 chiffres)" });
+
+    const normalizedPhone = smsService.normalizePhone(phone);
+    const otpKey  = 'wa_otp_' + normalizedPhone;
+    const record  = otpCache.get(otpKey);
+
+    if (!record) return res.status(400).json({ success: false, message: "Code expiré. Demandez un nouveau code." });
+
+    record.attempts++;
+    if (record.attempts > 3) {
+      otpCache.del(otpKey);
+      return res.status(429).json({ success: false, message: "Trop de tentatives. Demandez un nouveau code." });
+    }
+    otpCache.set(otpKey, record);
+
+    if (record.otp !== otp) {
+      const left = 3 - record.attempts;
+      return res.status(400).json({ success: false, message: "Code incorrect. " + left + " tentative(s) restante(s).", attemptsLeft: left });
+    }
+
+    otpCache.del(otpKey);
+    const token = jwt.sign(
+      { phone: normalizedPhone, whatsappVerified: true },
+      process.env.JWT_SECRET || 'hird2026XkP9mQ3nR7qL5wZ2',
+      { expiresIn: '30m' }
+    );
+
+    res.json({ success: true, message: "Numéro WhatsApp vérifié ✓", verificationToken: token });
+  } catch (err) {
+    console.error('[verify-whatsapp-otp]', err.message);
+    res.status(500).json({ success: false, message: "Erreur serveur" });
+  }
+});
+
+// ── POST /api/reminders/whatsapp ──────────────────────────────────────────
+app.post('/api/reminders/whatsapp', async (req, res) => {
+  try {
+    const { phone, name, taskTitle, deadline, priority, progress } = req.body;
+    if (!phone || !taskTitle) return res.status(400).json({ success: false, message: "Numéro et titre requis" });
+
+    const normalizedPhone = smsService.normalizePhone(phone);
+    if (!normalizedPhone) return res.status(400).json({ success: false, message: "Format de numéro invalide" });
+
+    await smsService.sendWhatsAppReminder({
+      phone:     normalizedPhone,
+      name:      name      || 'Utilisateur',
+      taskTitle: taskTitle.slice(0, 200),
+      deadline:  deadline  || '',
+      priority:  priority  || 'moyenne',
+      progress:  Math.min(100, Math.max(0, parseInt(progress) || 0)),
+    });
+
+    res.json({ success: true, message: "Rappel WhatsApp envoyé via " + normalizedPhone });
+  } catch (err) {
+    console.error('[reminders/whatsapp]', err.message);
+    res.status(500).json({ success: false, message: "Erreur envoi rappel WhatsApp" });
+  }
+});
+
 // ── POST /api/reminders/send ───────────────────────────────────────────────
 // Reçoit une demande de rappel depuis l'application et envoie l'email via Brevo
 app.post('/api/reminders/send', async (req, res) => {
