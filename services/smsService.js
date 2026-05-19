@@ -131,7 +131,11 @@ async function sendWhatsAppOTP(phone, name, otp) {
   return sendWhatsApp(phone, body);
 }
 
-async function sendWhatsAppReminder({ phone, name, taskTitle, deadline, priority, progress }) {
+async function sendWhatsAppReminder({ phone, name, taskTitle, deadline, priority, progress, customMessage }) {
+  // Si un message personnalisé est fourni (ex: digest), l'utiliser directement
+  if (customMessage) {
+    return sendWhatsApp(phone, customMessage);
+  }
   const prioEmoji = { haute: '🔥', moyenne: '🟡', basse: '🟢' }[priority] || '📋';
   const statusTxt = progress >= 100 ? '✅ Terminé' : progress > 0 ? '⏳ ' + progress + '% réalisé' : '○ Non commencé';
   const body =
