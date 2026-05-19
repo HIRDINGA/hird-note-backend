@@ -233,4 +233,15 @@ async function sendWelcomeEmail({ to, name }) {
   });
 }
 
-module.exports = { sendOTPEmail, sendReminderEmail, sendWelcomeEmail };
+
+async function sendDigestEmail({ to, name, subject, html, taskCount }) {
+  return _send({
+    to, toName: name,
+    subject: subject || '[Hird Note] Récapitulatif quotidien',
+    html:    html || '<p>Récapitulatif du jour</p>',
+    text:    'Bonjour ' + name + ', voici votre récapitulatif Hird Note du jour. ' + taskCount + ' tâche(s) prévues.',
+    tags:    [{ name: 'type', value: 'digest' }],
+  });
+}
+
+module.exports = { sendOTPEmail, sendReminderEmail, sendWelcomeEmail, sendDigestEmail };
