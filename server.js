@@ -1,776 +1,329 @@
-// ═══════════════════════════════════════════════════════════════════════════
-//  Hird Note — Backend OTP & Authentification
-//  Node.js + Express + Brevo (SendinBlue)
-//  Déploiement : Render.com (gratuit)
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// HIRD NOTE BACKEND v2.0
+// Express + Supabase + Postmark + Brevo OTP
+// ═══════════════════════════════════════════════════════════════════════
 
 require('dotenv').config();
+const express  = require('express');
+const cors     = require('cors');
+const app      = express();
 
-// ── Variables de secours si Render Environment non configuré ─────────────
-if (!process.env.RESEND_API_KEY)  process.env.RESEND_API_KEY  = 're_SFyuDQe6_Pf24F9SZLddcnXdAnUmkuiQo';
-if (!process.env.SENDER_EMAIL)    process.env.SENDER_EMAIL    = 'noreply@hird-tech.com';
-if (!process.env.SENDER_NAME)     process.env.SENDER_NAME     = 'Hird Note';
-if (!process.env.JWT_SECRET)      process.env.JWT_SECRET      = 'hird2026XkP9mQ3nR7qL5wZ2';
-if (!process.env.ALLOWED_ORIGINS) process.env.ALLOWED_ORIGINS = '*';
-// ─────────────────────────────────────────────────────────────────────────
+// ── CORS ───────────────────────────────────────────────────────────────
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
-const express    = require('express');
-const cors       = require('cors');
-const helmet     = require('helmet');
-const rateLimit  = require('express-rate-limit');
-const NodeCache  = require('node-cache');
-const bcrypt     = require('bcryptjs');
-const jwt        = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
-const emailService = require('./services/emailService');
-// sendReminderEmail exporté depuis emailService
-const smsService   = require('./services/smsService');
-const { validateEmail, validateOTP, validatePassword } = require('./utils/validators');
-
-const app  = express();
-const PORT = process.env.PORT || 3000;
-
-// ── Cache en mémoire (OTP, sessions temporaires) ─────────────────────────
-// TTL = 10 minutes pour les OTP
-const otpCache   = new NodeCache({ stdTTL: 600,  checkperiod: 60 });
-// TTL = 24h pour les données utilisateurs (en prod, remplacer par une DB)
-const usersCache = new NodeCache({ stdTTL: 86400, checkperiod: 300 });
-
-// ── Middleware de sécurité ────────────────────────────────────────────────
-app.use(helmet());
-app.use(express.json({ limit: '10kb' }));
-
-// CORS — autoriser votre frontend Hird Note
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*').split(',');
 app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('CORS non autorisé'));
-    }
+  origin: function(origin, callback) {
+    // Permettre les requêtes sans origin (Postman, mobile, no-cors)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.length === 0) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    // Permettre tous les netlify.app par défaut
+    if (origin.endsWith('.netlify.app')) return callback(null, true);
+    if (origin.endsWith('.onrender.com')) return callback(null, true);
+    callback(null, true); // Permissif pour le développement
   },
-  methods:     ['GET', 'POST', 'PUT'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 }));
 
-// ── Rate limiting ─────────────────────────────────────────────────────────
-// Envoi OTP : max 3 demandes par 15 minutes par IP
-const otpLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 3,
-  message: { success: false, message: 'Trop de demandes OTP. Réessayez dans 15 minutes.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+app.use(express.json());
 
-// Vérification OTP : max 10 tentatives par 15 minutes
-const verifyLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { success: false, message: 'Trop de tentatives. Réessayez dans 15 minutes.' },
-});
+// ── Supabase ───────────────────────────────────────────────────────────
+const { createClient } = require('@supabase/supabase-js');
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
-// Login : max 5 tentatives par 15 minutes
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  message: { success: false, message: 'Trop de tentatives de connexion. Réessayez dans 15 minutes.' },
-});
+// ── Postmark ───────────────────────────────────────────────────────────
+const postmark = require('postmark');
+const postmarkClient = new postmark.ServerClient(process.env.POSTMARK_TOKEN);
+const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@hird-tech.com';
 
-// Global : 100 requêtes par 15 minutes par IP
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-});
-app.use(globalLimiter);
+// ── Stockage OTP en mémoire ────────────────────────────────────────────
+const otpStore = new Map();
 
-// ── Utilitaire : générer un OTP à 6 chiffres ─────────────────────────────
-function generateOTP() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
+// ══ ROUTES OTP ══════════════════════════════════════════════════════════
 
-// ── Middleware : vérifier le JWT ──────────────────────────────────────────
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, message: 'Token manquant' });
-  }
+// POST /api/auth/send-otp
+app.post('/api/auth/send-otp', async (req, res) => {
   try {
-    const token = authHeader.split(' ')[1];
-    req.user = jwt.verify(token, process.env.JWT_SECRET || 'hird-note-secret-change-me');
-    next();
-  } catch {
-    res.status(401).json({ success: false, message: 'Token invalide ou expiré' });
+    const { email, name, otp_override } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: 'Email requis' });
+
+    const code    = otp_override || Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry  = Date.now() + 10 * 60 * 1000; // 10 minutes
+    otpStore.set(email, { code, expiry });
+
+    // Envoyer via Postmark
+    await postmarkClient.sendEmail({
+      From   : FROM_EMAIL,
+      To     : email,
+      Subject: 'Votre code de vérification Hird Note',
+      HtmlBody: `
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:32px;background:#fff;border-radius:12px;">
+          <div style="background:#1C1A16;border-radius:8px;padding:20px;text-align:center;margin-bottom:24px;">
+            <div style="color:#C9A84C;font-size:22px;font-weight:700;letter-spacing:2px;">✦ HIRD NOTE</div>
+          </div>
+          <p style="color:#333;">Bonjour <strong>${name || email}</strong>,</p>
+          <p style="color:#555;">Votre code de vérification est :</p>
+          <div style="background:#f5f0e8;border:2px solid #C9A84C;border-radius:12px;padding:24px;text-align:center;margin:20px 0;">
+            <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#1C1A16;">${code}</div>
+          </div>
+          <p style="color:#888;font-size:13px;">Ce code expire dans 10 minutes. Ne le partagez jamais.</p>
+          <p style="color:#aaa;font-size:11px;margin-top:24px;">— Hird Note · Votre assistant de productivité</p>
+        </div>`,
+      TextBody: `Bonjour ${name || email},\n\nVotre code Hird Note : ${code}\n\nExpire dans 10 minutes.\n\n— Hird Note`,
+      MessageStream: 'outbound',
+    });
+
+    console.log(`[OTP] Code envoyé à ${email}`);
+    res.json({ success: true, message: 'Code OTP envoyé' });
+
+  } catch (err) {
+    console.error('[OTP] Erreur envoi:', err.message);
+    res.status(500).json({ success: false, message: 'Erreur envoi OTP: ' + err.message });
   }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  ROUTES
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ── GET / — Santé du serveur ───────────────────────────────────────────────
-app.get('/', (req, res) => {
-  res.json({
-    app:     'Hird Note Backend',
-    version: '1.0.0',
-    status:  'OK ✓',
-    time:    new Date().toISOString(),
-  });
 });
 
-// ── POST /api/auth/send-otp ────────────────────────────────────────────────
-// Envoie un code OTP à l'email fourni
-app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
-  try {
-    const { email, name, type = 'register' } = req.body;
+// POST /api/auth/verify-otp
+app.post('/api/auth/verify-otp', (req, res) => {
+  const { email, otp } = req.body;
+  if (!email || !otp) return res.status(400).json({ success: false, message: 'Email et OTP requis' });
 
-    // Validation
-    if (!email || !validateEmail(email)) {
-      return res.status(400).json({ success: false, message: 'Email invalide' });
+  const record = otpStore.get(email);
+  if (!record) return res.json({ success: false, message: 'Code non trouvé ou expiré' });
+  if (Date.now() > record.expiry) {
+    otpStore.delete(email);
+    return res.json({ success: false, message: 'Code expiré' });
+  }
+  if (record.code !== otp.toString()) {
+    return res.json({ success: false, message: 'Code incorrect' });
+  }
+
+  otpStore.delete(email);
+  const token = Buffer.from(`${email}:${Date.now()}`).toString('base64');
+  res.json({ success: true, verificationToken: token });
+});
+
+// ══ ROUTES RAPPELS ══════════════════════════════════════════════════════
+
+// POST /api/reminders/schedule — programmer un rappel
+app.post('/api/reminders/schedule', async (req, res) => {
+  try {
+    const {
+      task_id, user_email, user_name, task_title,
+      task_desc = '', deadline, priority = 'moyenne',
+      progress = 0, reminder_minutes, group_members = []
+    } = req.body;
+
+    if (!task_id || !user_email || !task_title || !deadline || !reminder_minutes) {
+      return res.status(400).json({ success: false, error: 'Champs manquants' });
     }
 
-    // Pour l'inscription, vérifier si l'email n'est pas déjà utilisé
-    if (type === 'register') {
-      const existingUser = usersCache.get('user_' + email.toLowerCase());
-      if (existingUser && existingUser.verified) {
-        return res.status(409).json({
-          success: false,
-          message: 'Cet email est déjà enregistré. Connectez-vous.'
+    const deadlineDate  = new Date(deadline);
+    const reminderDate  = new Date(deadlineDate.getTime() - reminder_minutes * 60 * 1000);
+
+    if (reminderDate <= new Date()) {
+      return res.status(400).json({ success: false, error: 'Rappel déjà passé' });
+    }
+
+    // Supprimer anciens rappels non envoyés pour cette tâche
+    await supabase.from('scheduled_reminders')
+      .delete().eq('task_id', task_id).eq('sent', false);
+
+    // Insérer le nouveau rappel
+    const { data, error } = await supabase.from('scheduled_reminders')
+      .insert({
+        task_id, user_email, user_name, task_title, task_desc,
+        deadline: deadlineDate.toISOString(),
+        priority, progress,
+        reminder_time: reminderDate.toISOString(),
+        group_members
+      }).select().single();
+
+    if (error) throw error;
+
+    console.log(`[Rappel] Programmé: "${task_title}" → ${reminderDate.toLocaleString('fr-FR')}`);
+    res.json({ success: true, id: data.id, reminder_time: reminderDate.toISOString() });
+
+  } catch (err) {
+    console.error('[Rappel] Erreur schedule:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/reminders/process — traiter les rappels dus (cron)
+app.get('/api/reminders/process', async (req, res) => {
+  try {
+    const now = new Date();
+    const { data: reminders, error } = await supabase
+      .from('scheduled_reminders')
+      .select('*')
+      .eq('sent', false)
+      .lte('reminder_time', now.toISOString())
+      .limit(50);
+
+    if (error) throw error;
+    if (!reminders || reminders.length === 0) {
+      return res.json({ success: true, processed: 0, message: 'Aucun rappel dû' });
+    }
+
+    console.log(`[Cron] ${reminders.length} rappel(s) à traiter`);
+    let sent = 0;
+
+    for (const reminder of reminders) {
+      try {
+        const deadline    = new Date(reminder.deadline);
+        const diffMin     = Math.round((deadline - now) / 60000);
+        const delayText   = diffMin >= 60 ? `${Math.round(diffMin/60)}h` : `${Math.max(0,diffMin)} min`;
+        const deadlineStr = deadline.toLocaleString('fr-FR', {
+          day:'2-digit', month:'long', year:'numeric',
+          hour:'2-digit', minute:'2-digit'
         });
+
+        const recipients = [reminder.user_email];
+        if (reminder.group_members && reminder.group_members.length > 0) {
+          recipients.push(...reminder.group_members);
+        }
+
+        const priorityEmoji = { haute:'🔥', moyenne:'🟡', basse:'🟢' }[reminder.priority] || '🟡';
+
+        for (const email of recipients) {
+          const isOwner = email === reminder.user_email;
+          await postmarkClient.sendEmail({
+            From   : FROM_EMAIL,
+            To     : email,
+            Subject: `⏰ Rappel Hird Note — ${reminder.task_title}`,
+            HtmlBody: `
+              <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08);">
+                <div style="background:#1C1A16;border-radius:8px;padding:20px;text-align:center;margin-bottom:20px;">
+                  <div style="color:#C9A84C;font-size:20px;font-weight:700;">✦ HIRD NOTE</div>
+                  <div style="background:#C4623A;color:#fff;border-radius:20px;padding:4px 14px;font-size:13px;display:inline-block;margin-top:8px;">⏰ Dans ${delayText}</div>
+                </div>
+                <p>Bonjour <strong>${isOwner ? reminder.user_name : 'Membre du groupe'}</strong>,</p>
+                ${!isOwner ? `<p style="color:#666;font-size:13px;">📋 Tâche créée par <strong>${reminder.user_name}</strong></p>` : ''}
+                <h2 style="color:#1C1A16;font-size:18px;margin:0 0 16px;">${reminder.task_title}</h2>
+                ${reminder.task_desc ? `<p style="color:#666;font-size:13px;">${reminder.task_desc}</p>` : ''}
+                <table style="width:100%;border-collapse:collapse;">
+                  <tr><td style="padding:8px 0;border-bottom:1px solid #f0f0f0;color:#888;font-size:13px;">📅 Échéance</td><td style="font-weight:600;font-size:13px;text-align:right;">${deadlineStr}</td></tr>
+                  <tr><td style="padding:8px 0;border-bottom:1px solid #f0f0f0;color:#888;font-size:13px;">⚡ Priorité</td><td style="font-weight:600;font-size:13px;text-align:right;">${priorityEmoji} ${reminder.priority}</td></tr>
+                  <tr><td style="padding:8px 0;color:#888;font-size:13px;">📊 Progression</td><td style="font-weight:600;font-size:13px;text-align:right;">${reminder.progress}%</td></tr>
+                </table>
+                <div style="background:#f0f0f0;border-radius:4px;height:8px;margin:12px 0;">
+                  <div style="background:#C9A84C;border-radius:4px;height:8px;width:${reminder.progress}%;"></div>
+                </div>
+                <p style="color:#aaa;font-size:11px;text-align:center;margin-top:20px;">Hird Note · Votre assistant de productivité</p>
+              </div>`,
+            TextBody: `Rappel dans ${delayText} : "${reminder.task_title}"\nÉchéance : ${deadlineStr}\n\n— Hird Note`,
+            MessageStream: 'outbound',
+          });
+        }
+
+        await supabase.from('scheduled_reminders')
+          .update({ sent: true, sent_at: now.toISOString() })
+          .eq('id', reminder.id);
+
+        sent++;
+        console.log(`[Cron] ✓ Email(s) envoyé(s) pour: "${reminder.task_title}"`);
+
+      } catch (emailErr) {
+        console.error(`[Cron] Erreur pour ${reminder.id}:`, emailErr.message);
       }
     }
 
-    // Générer l'OTP
-    const otp      = generateOTP();
-    const otpKey   = 'otp_' + email.toLowerCase();
-    const attempts = 0;
-
-    // Stocker dans le cache (10 min)
-    otpCache.set(otpKey, { otp, attempts, type, createdAt: Date.now() });
-
-    // Envoyer l'email via Brevo
-    await emailService.sendOTPEmail({
-      to:    email,
-      name:  name  || 'Utilisateur',
-      otp,
-      type,
-    });
-
-    res.json({
-      success: true,
-      message: `Code OTP envoyé à ${email}`,
-      expiresIn: 600, // secondes
-    });
+    res.json({ success: true, processed: reminders.length, sent });
 
   } catch (err) {
-    console.error('[send-otp]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur lors de l\'envoi. Réessayez.' });
+    console.error('[Cron] Erreur process:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── POST /api/auth/verify-otp ──────────────────────────────────────────────
-// Vérifie le code OTP saisi par l'utilisateur
-app.post('/api/auth/verify-otp', verifyLimiter, (req, res) => {
+// DELETE /api/reminders/cancel/:task_id
+app.delete('/api/reminders/cancel/:task_id', async (req, res) => {
   try {
-    const { email, otp } = req.body;
-
-    if (!email || !otp) {
-      return res.status(400).json({ success: false, message: 'Email et code requis' });
-    }
-    if (!validateOTP(otp)) {
-      return res.status(400).json({ success: false, message: 'Code OTP invalide (6 chiffres requis)' });
-    }
-
-    const otpKey = 'otp_' + email.toLowerCase();
-    const record = otpCache.get(otpKey);
-
-    if (!record) {
-      return res.status(400).json({ success: false, message: 'Code expiré ou introuvable. Demandez un nouveau code.' });
-    }
-
-    // Incrémenter les tentatives
-    record.attempts++;
-    if (record.attempts > 3) {
-      otpCache.del(otpKey);
-      return res.status(429).json({ success: false, message: "Trop de tentatives. Demandez un nouveau code." });
-    }
-    otpCache.set(otpKey, record);
-
-    // Comparer
-    if (record.otp !== otp) {
-      const remaining = 3 - record.attempts;
-      return res.status(400).json({
-        success: false,
-        message: `Code incorrect. ${remaining} tentative(s) restante(s).`,
-        attemptsLeft: remaining,
-      });
-    }
-
-    // ✓ OTP valide — générer un token temporaire de vérification
-    otpCache.del(otpKey);
-    const verificationToken = jwt.sign(
-      { email: email.toLowerCase(), verified: true, purpose: record.type },
-      process.env.JWT_SECRET || 'hird-note-secret-change-me',
-      { expiresIn: '30m' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Email vérifié avec succès ✓',
-      verificationToken,
-    });
-
+    await supabase.from('scheduled_reminders')
+      .delete().eq('task_id', req.params.task_id).eq('sent', false);
+    res.json({ success: true });
   } catch (err) {
-    console.error('[verify-otp]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── POST /api/auth/register ────────────────────────────────────────────────
-// Finalise l'inscription avec mot de passe (après OTP validé)
-app.post('/api/auth/register', async (req, res) => {
-  try {
-    const { verificationToken, name, phone, password, dial } = req.body;
-
-    if (!verificationToken || !password) {
-      return res.status(400).json({ success: false, message: 'Token et mot de passe requis' });
-    }
-    if (!validatePassword(password)) {
-      return res.status(400).json({ success: false, message: 'Mot de passe trop faible (min 8 caractères)' });
-    }
-
-    // Vérifier le token de vérification
-    let decoded;
-    try {
-      decoded = jwt.verify(verificationToken, process.env.JWT_SECRET || 'hird-note-secret-change-me');
-    } catch {
-      return res.status(401).json({ success: false, message: "Token de vérification invalide ou expiré" });
-    }
-
-    if (!decoded.verified || decoded.purpose !== 'register') {
-      return res.status(401).json({ success: false, message: 'Token invalide' });
-    }
-
-    const email = decoded.email;
-
-    // Vérifier si déjà enregistré
-    if (usersCache.get('user_' + email)) {
-      return res.status(409).json({ success: false, message: 'Compte déjà existant. Connectez-vous.' });
-    }
-
-    // Hasher le mot de passe
-    const passwordHash = await bcrypt.hash(password, 12);
-
-    // Créer l'utilisateur
-    const userId = uuidv4();
-    const user   = {
-      id:           userId,
-      name:         name  || '',
-      email,
-      phone:        phone || '',
-      dial:         dial  || '',
-      passwordHash,
-      verified:     true,
-      createdAt:    new Date().toISOString(),
-      lastLoginAt:  null,
-    };
-
-    // Sauvegarder (en production : remplacer par MongoDB/PostgreSQL)
-    usersCache.set('user_' + email, user);
-
-    // Générer le JWT d'accès
-    const accessToken = jwt.sign(
-      { userId, email, name: user.name },
-      process.env.JWT_SECRET || 'hird-note-secret-change-me',
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-    );
-
-    // Email de bienvenue
-    emailService.sendWelcomeEmail({ to: email, name: user.name }).catch(console.error);
-
-    res.status(201).json({
-      success: true,
-      message: 'Compte créé avec succès ! Bienvenue sur Hird Note ✦',
-      accessToken,
-      user: {
-        id:    userId,
-        name:  user.name,
-        email,
-        phone: user.phone,
-      },
-    });
-
-  } catch (err) {
-    console.error('[register]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
-  }
-});
-
-// ── POST /api/auth/login ───────────────────────────────────────────────────
-// Connexion avec email + mot de passe
-app.post('/api/auth/login', loginLimiter, async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email et mot de passe requis' });
-    }
-
-    const user = usersCache.get('user_' + email.toLowerCase());
-    if (!user || !user.verified) {
-      // Délai pour éviter les attaques timing
-      await new Promise(r => setTimeout(r, 300));
-      return res.status(401).json({ success: false, message: 'Email ou mot de passe incorrect' });
-    }
-
-    const isValid = await bcrypt.compare(password, user.passwordHash);
-    if (!isValid) {
-      await new Promise(r => setTimeout(r, 300));
-      return res.status(401).json({ success: false, message: 'Email ou mot de passe incorrect' });
-    }
-
-    // Mettre à jour la dernière connexion
-    user.lastLoginAt = new Date().toISOString();
-    usersCache.set('user_' + email.toLowerCase(), user);
-
-    // Générer le JWT
-    const accessToken = jwt.sign(
-      { userId: user.id, email: user.email, name: user.name },
-      process.env.JWT_SECRET || 'hird-note-secret-change-me',
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Connexion réussie ✦',
-      accessToken,
-      user: {
-        id:          user.id,
-        name:        user.name,
-        email:       user.email,
-        phone:       user.phone,
-        lastLoginAt: user.lastLoginAt,
-      },
-    });
-
-  } catch (err) {
-    console.error('[login]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
-  }
-});
-
-// ── POST /api/auth/forgot-password ────────────────────────────────────────
-// Envoie un OTP de réinitialisation de mot de passe
-app.post('/api/auth/forgot-password', otpLimiter, async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email || !validateEmail(email)) {
-      return res.status(400).json({ success: false, message: 'Email invalide' });
-    }
-
-    const user = usersCache.get('user_' + email.toLowerCase());
-    // Répondre toujours la même chose (éviter l'énumération d'emails)
-    if (!user) {
-      return res.json({ success: true, message: 'Si ce compte existe, un code vous sera envoyé.' });
-    }
-
-    const otp    = generateOTP();
-    const otpKey = 'otp_' + email.toLowerCase();
-    otpCache.set(otpKey, { otp, attempts: 0, type: 'reset', createdAt: Date.now() });
-
-    await emailService.sendOTPEmail({
-      to:   email,
-      name: user.name,
-      otp,
-      type: 'reset',
-    });
-
-    res.json({ success: true, message: 'Si ce compte existe, un code vous sera envoyé.' });
-
-  } catch (err) {
-    console.error('[forgot-password]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
-  }
-});
-
-// ── POST /api/auth/reset-password ─────────────────────────────────────────
-// Réinitialise le mot de passe après OTP validé
-app.post('/api/auth/reset-password', async (req, res) => {
-  try {
-    const { verificationToken, newPassword } = req.body;
-
-    if (!verificationToken || !newPassword) {
-      return res.status(400).json({ success: false, message: 'Token et nouveau mot de passe requis' });
-    }
-    if (!validatePassword(newPassword)) {
-      return res.status(400).json({ success: false, message: 'Mot de passe trop faible (min 8 caractères)' });
-    }
-
-    let decoded;
-    try {
-      decoded = jwt.verify(verificationToken, process.env.JWT_SECRET || 'hird-note-secret-change-me');
-    } catch {
-      return res.status(401).json({ success: false, message: "Token expiré. Recommencez." });
-    }
-
-    if (!decoded.verified || decoded.purpose !== 'reset') {
-      return res.status(401).json({ success: false, message: 'Token invalide' });
-    }
-
-    const user = usersCache.get('user_' + decoded.email);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'Compte introuvable' });
-    }
-
-    user.passwordHash = await bcrypt.hash(newPassword, 12);
-    usersCache.set('user_' + decoded.email, user);
-
-    res.json({ success: true, message: 'Mot de passe réinitialisé avec succès ✓' });
-
-  } catch (err) {
-    console.error('[reset-password]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
-  }
-});
-
-// ── GET /api/auth/me ───────────────────────────────────────────────────────
-// Récupère les infos de l'utilisateur connecté (vérifie le JWT)
-app.get('/api/auth/me', authMiddleware, (req, res) => {
-  const user = usersCache.get('user_' + req.user.email);
-  if (!user) {
-    return res.status(404).json({ success: false, message: 'Utilisateur introuvable' });
-  }
-  res.json({
-    success: true,
-    user: {
-      id:          user.id,
-      name:        user.name,
-      email:       user.email,
-      phone:       user.phone,
-      createdAt:   user.createdAt,
-      lastLoginAt: user.lastLoginAt,
-    },
-  });
-});
-
-// ── PUT /api/auth/update-profile ──────────────────────────────────────────
-// Mise à jour du profil
-app.put('/api/auth/update-profile', authMiddleware, (req, res) => {
-  try {
-    const { name, phone, dial } = req.body;
-    const user = usersCache.get('user_' + req.user.email);
-    if (!user) return res.status(404).json({ success: false, message: 'Utilisateur introuvable' });
-
-    if (name)  user.name  = name;
-    if (phone) user.phone = phone;
-    if (dial)  user.dial  = dial;
-    usersCache.set('user_' + req.user.email, user);
-
-    res.json({ success: true, message: 'Profil mis à jour ✓', user: { name: user.name, phone: user.phone } });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
-  }
-});
-
-
-
-// ── POST /api/auth/send-sms-otp ───────────────────────────────────────────
-// Envoie un OTP par SMS pour vérifier le numéro de téléphone
-app.post('/api/auth/send-sms-otp', otpLimiter, async (req, res) => {
-  try {
-    const { phone, name, code } = req.body;
-
-    if (!phone) {
-      return res.status(400).json({ success: false, message: 'Numéro de téléphone requis' });
-    }
-
-    const normalizedPhone = smsService.normalizePhone(phone);
-    if (!normalizedPhone) {
-      return res.status(400).json({ success: false, message: 'Format de numéro invalide' });
-    }
-
-    // Utiliser le code fourni par le frontend ou en générer un nouveau
-    const otp    = code || String(Math.floor(100000 + Math.random() * 900000));
-    const otpKey = 'sms_otp_' + normalizedPhone;
-
-    // Stocker dans le cache (10 min)
-    otpCache.set(otpKey, { otp, attempts: 0, createdAt: Date.now() });
-
-    // Envoyer le SMS
-    await smsService.sendPhoneOTP(normalizedPhone, name || 'Utilisateur', otp);
-
-    res.json({
-      success:   true,
-      message:   `SMS envoyé au ${normalizedPhone}`,
-      expiresIn: 600,
-    });
-
-  } catch (err) {
-    console.error('[send-sms-otp]', err.message);
-    res.status(500).json({ success: false, message: "Erreur lors de l'envoi du SMS. Vérifiez le format du numéro." });
-  }
-});
-
-// ── POST /api/auth/verify-sms-otp ─────────────────────────────────────────
-// Vérifie le code OTP SMS
-app.post('/api/auth/verify-sms-otp', verifyLimiter, (req, res) => {
-  try {
-    const { phone, otp } = req.body;
-
-    if (!phone || !otp) {
-      return res.status(400).json({ success: false, message: 'Numéro et code requis' });
-    }
-    if (!validateOTP(otp)) {
-      return res.status(400).json({ success: false, message: 'Code OTP invalide (6 chiffres requis)' });
-    }
-
-    const normalizedPhone = smsService.normalizePhone(phone);
-    const otpKey = 'sms_otp_' + normalizedPhone;
-    const record = otpCache.get(otpKey);
-
-    if (!record) {
-      return res.status(400).json({ success: false, message: "Code expiré. Demandez un nouveau SMS." });
-    }
-
-    record.attempts++;
-    if (record.attempts > 3) {
-      otpCache.del(otpKey);
-      return res.status(429).json({ success: false, message: "Trop de tentatives. Demandez un nouveau code." });
-    }
-    otpCache.set(otpKey, record);
-
-    if (record.otp !== otp) {
-      const remaining = 3 - record.attempts;
-      return res.status(400).json({
-        success: false,
-        message: `Code SMS incorrect. ${remaining} tentative(s) restante(s).`,
-        attemptsLeft: remaining,
-      });
-    }
-
-    // ✓ Code SMS correct
-    otpCache.del(otpKey);
-    const verificationToken = jwt.sign(
-      { phone: normalizedPhone, phoneVerified: true },
-      process.env.JWT_SECRET || 'hird-note-secret-change-me',
-      { expiresIn: '30m' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Numéro de téléphone vérifié ✓',
-      verificationToken,
-    });
-
-  } catch (err) {
-    console.error('[verify-sms-otp]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur serveur' });
-  }
-});
-
-
-// ══ WHATSAPP — OTP ET RAPPELS ════════════════════════════════════════════
-
-// ── POST /api/auth/send-whatsapp-otp ─────────────────────────────────────
-app.post('/api/auth/send-whatsapp-otp', otpLimiter, async (req, res) => {
-  try {
-    const { phone, name, code } = req.body;
-    if (!phone) return res.status(400).json({ success: false, message: "Numéro requis" });
-
-    const normalizedPhone = smsService.normalizePhone(phone);
-    if (!normalizedPhone) return res.status(400).json({ success: false, message: "Format de numéro invalide" });
-
-    const otp    = code || String(Math.floor(100000 + Math.random() * 900000));
-    const otpKey = 'wa_otp_' + normalizedPhone;
-    otpCache.set(otpKey, { otp, attempts: 0, createdAt: Date.now() });
-
-    // Envoyer via WhatsApp (Twilio sandbox)
-    await smsService.sendWhatsAppOTP(normalizedPhone, name || 'Utilisateur', otp);
-
-    res.json({ success: true, message: "Code WhatsApp envoyé au " + normalizedPhone, expiresIn: 600 });
-  } catch (err) {
-    console.error('[send-whatsapp-otp]', err.message);
-    res.status(500).json({ success: false, message: "Erreur lors de l'envoi WhatsApp" });
-  }
-});
-
-// ── POST /api/auth/verify-whatsapp-otp ───────────────────────────────────
-app.post('/api/auth/verify-whatsapp-otp', verifyLimiter, (req, res) => {
-  try {
-    const { phone, otp } = req.body;
-    if (!phone || !otp) return res.status(400).json({ success: false, message: "Numéro et code requis" });
-    if (!validateOTP(otp)) return res.status(400).json({ success: false, message: "Code invalide (6 chiffres)" });
-
-    const normalizedPhone = smsService.normalizePhone(phone);
-    const otpKey  = 'wa_otp_' + normalizedPhone;
-    const record  = otpCache.get(otpKey);
-
-    if (!record) return res.status(400).json({ success: false, message: "Code expiré. Demandez un nouveau code." });
-
-    record.attempts++;
-    if (record.attempts > 3) {
-      otpCache.del(otpKey);
-      return res.status(429).json({ success: false, message: "Trop de tentatives. Demandez un nouveau code." });
-    }
-    otpCache.set(otpKey, record);
-
-    if (record.otp !== otp) {
-      const left = 3 - record.attempts;
-      return res.status(400).json({ success: false, message: "Code incorrect. " + left + " tentative(s) restante(s).", attemptsLeft: left });
-    }
-
-    otpCache.del(otpKey);
-    const token = jwt.sign(
-      { phone: normalizedPhone, whatsappVerified: true },
-      process.env.JWT_SECRET || 'hird2026XkP9mQ3nR7qL5wZ2',
-      { expiresIn: '30m' }
-    );
-
-    res.json({ success: true, message: "Numéro WhatsApp vérifié ✓", verificationToken: token });
-  } catch (err) {
-    console.error('[verify-whatsapp-otp]', err.message);
-    res.status(500).json({ success: false, message: "Erreur serveur" });
-  }
-});
-
-// ── POST /api/reminders/whatsapp ──────────────────────────────────────────
-app.post('/api/reminders/whatsapp', async (req, res) => {
-  try {
-    const { phone, name, taskTitle, deadline, priority, progress } = req.body;
-    if (!phone || !taskTitle) return res.status(400).json({ success: false, message: "Numéro et titre requis" });
-
-    const normalizedPhone = smsService.normalizePhone(phone);
-    if (!normalizedPhone) return res.status(400).json({ success: false, message: "Format de numéro invalide" });
-
-    await smsService.sendWhatsAppReminder({
-      phone:     normalizedPhone,
-      name:      name      || 'Utilisateur',
-      taskTitle: taskTitle.slice(0, 200),
-      deadline:  deadline  || '',
-      priority:  priority  || 'moyenne',
-      progress:  Math.min(100, Math.max(0, parseInt(progress) || 0)),
-    });
-
-    res.json({ success: true, message: "Rappel WhatsApp envoyé via " + normalizedPhone });
-  } catch (err) {
-    console.error('[reminders/whatsapp]', err.message);
-    res.status(500).json({ success: false, message: "Erreur envoi rappel WhatsApp" });
-  }
-});
-
-// ── POST /api/reminders/send ───────────────────────────────────────────────
-// Reçoit une demande de rappel depuis l'application et envoie l'email via Brevo
+// POST /api/reminders/send — rappel immédiat (depuis frontend)
 app.post('/api/reminders/send', async (req, res) => {
   try {
-    const { to, phone, name, taskTitle, taskDesc, deadline, priority, progress } = req.body;
+    const { to, name, taskTitle, taskDesc, deadline, priority, progress, creator, minutesBefore } = req.body;
+    if (!to || !taskTitle) return res.status(400).json({ success: false });
 
-    if (!to || !taskTitle) {
-      return res.status(400).json({ success: false, message: 'Email destinataire et titre de tâche requis' });
-    }
-    if (!validateEmail(to)) {
-      return res.status(400).json({ success: false, message: 'Email destinataire invalide' });
-    }
+    const priorityEmoji = { haute:'🔥', moyenne:'🟡', basse:'🟢' }[priority] || '🟡';
+    const delayText = minutesBefore ? `${minutesBefore} min` : 'maintenant';
 
-    const pct = Math.min(100, Math.max(0, parseInt(progress) || 0));
-    const opts = {
-      name:      name      || 'Utilisateur',
-      taskTitle: taskTitle.slice(0, 200),
-      taskDesc:  (taskDesc || '').slice(0, 500),
-      deadline:  deadline  || '—',
-      priority:  priority  || 'moyenne',
-      progress:  pct,
-    };
-
-    // Envoyer l'email de rappel
-    await emailService.sendReminderEmail({ to, ...opts });
-
-    // Envoyer le SMS de rappel si numéro fourni
-    let smsSent = false;
-    if (phone) {
-      try {
-        const normalizedPhone = smsService.normalizePhone(phone);
-        if (normalizedPhone) {
-          await smsService.sendTaskReminderSMS({ phone: normalizedPhone, ...opts });
-          smsSent = true;
-        }
-      } catch (smsErr) {
-        console.warn('[reminders/send] SMS échoué :', smsErr.message);
-      }
-    }
-
-    res.json({
-      success: true,
-      message: `Rappel envoyé à ${to}${smsSent ? ' + SMS' : ''} pour "${taskTitle}"`,
-      emailSent: true,
-      smsSent,
+    await postmarkClient.sendEmail({
+      From   : FROM_EMAIL,
+      To     : to,
+      Subject: `⏰ Rappel Hird Note — ${taskTitle}`,
+      HtmlBody: `<div style="font-family:Arial;max-width:480px;margin:0 auto;padding:24px;">
+        <h2 style="color:#C9A84C;">⏰ Rappel Hird Note</h2>
+        <p>Bonjour <strong>${name || to}</strong>,</p>
+        ${creator ? `<p style="color:#666;font-size:13px;">Tâche de <strong>${creator}</strong></p>` : ''}
+        <h3>${taskTitle}</h3>
+        ${taskDesc ? `<p>${taskDesc}</p>` : ''}
+        <p>📅 Échéance : <strong>${deadline}</strong></p>
+        <p>${priorityEmoji} Priorité : ${priority} | 📊 ${progress}%</p>
+        <p style="color:#aaa;font-size:11px;">— Hird Note</p>
+      </div>`,
+      TextBody: `Rappel dans ${delayText} : "${taskTitle}"\nÉchéance : ${deadline}\n\n— Hird Note`,
+      MessageStream: 'outbound',
     });
 
+    res.json({ success: true });
   } catch (err) {
-    console.error('[reminders/send]', err.message);
-    res.status(500).json({ success: false, message: "Erreur lors de l'envoi du rappel" });
+    console.error('[Send] Erreur:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── POST /api/reminders/batch ──────────────────────────────────────────────
-// Envoi groupé de rappels (pour un service cron externe type cron-job.org)
-app.post('/api/reminders/batch', async (req, res) => {
-  try {
-    const { tasks, apiKey } = req.body;
+// ── Route santé ────────────────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'Hird Note Backend v2.0' });
+});
 
-    // Vérification clé API simple pour sécuriser l'endpoint batch
-    if (apiKey !== process.env.BATCH_API_KEY && process.env.BATCH_API_KEY) {
-      return res.status(401).json({ success: false, message: "Clé API invalide" });
-    }
-    if (!Array.isArray(tasks) || tasks.length === 0) {
-      return res.status(400).json({ success: false, message: 'Liste de tâches requise' });
-    }
+// ══ CRON JOB INTERNE (toutes les 60 secondes) ═══════════════════════════
+function startCronJob() {
+  console.log('[Cron] Démarré — vérification toutes les 60s');
+  setInterval(async () => {
+    try {
+      const now = new Date();
+      const { data: reminders } = await supabase
+        .from('scheduled_reminders')
+        .select('id')
+        .eq('sent', false)
+        .lte('reminder_time', now.toISOString())
+        .limit(1);
 
-    const results = { sent: 0, failed: 0, skipped: 0 };
-
-    for (const task of tasks.slice(0, 50)) { // max 50 par batch
-      if (!task.email || !task.title) { results.skipped++; continue; }
-      try {
-        await emailService.sendReminderEmail({
-          to:        task.email,
-          name:      task.userName  || 'Utilisateur',
-          taskTitle: task.title,
-          taskDesc:  task.desc      || '',
-          deadline:  task.deadline  || '—',
-          priority:  task.priority  || 'moyenne',
-          progress:  task.progress  || 0,
-        });
-        results.sent++;
-        // Pause entre les envois pour respecter les limites Brevo
-        await new Promise(r => setTimeout(r, 200));
-      } catch {
-        results.failed++;
+      if (reminders && reminders.length > 0) {
+        // Appel interne à processReminders
+        const fakeReq = {};
+        const fakeRes = {
+          json: (d) => console.log('[Cron] Résultat:', JSON.stringify(d)),
+          status: (c) => ({ json: (d) => console.error('[Cron] Erreur:', d) })
+        };
+        // Appel direct à la logique process
+        const resp = await fetch(`http://localhost:${PORT}/api/reminders/process`);
+        const data = await resp.json();
+        if (data.sent > 0) console.log(`[Cron] ${data.sent} email(s) envoyé(s)`);
       }
+    } catch (e) {
+      console.error('[Cron] Erreur tick:', e.message);
     }
+  }, 60 * 1000);
+}
 
-    res.json({ success: true, message: 'Batch traité', results });
-  } catch (err) {
-    console.error('[reminders/batch]', err.message);
-    res.status(500).json({ success: false, message: 'Erreur batch' });
-  }
-});
-
-// ── Gestion des erreurs globale ────────────────────────────────────────────
-app.use((err, req, res, next) => {
-  console.error('[ERROR]', err.message);
-  res.status(err.status || 500).json({ success: false, message: err.message || 'Erreur interne' });
-});
-
-// ── Démarrage ─────────────────────────────────────────────────────────────
+// ── Démarrage ──────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n  ✦ Hird Note Backend`);
-  console.log(`  ─────────────────────────────────`);
-  console.log(`  🚀 Serveur : http://localhost:${PORT}`);
-  console.log(`  📧 Email   : ${process.env.RESEND_API_KEY ? 'Resend configuré ✓' : '⚠ RESEND_API_KEY manquant — mode simulation'}`);
-  console.log(`  🔐 JWT     : ${process.env.JWT_SECRET ? 'Configuré ✓' : '⚠ Utilise la clé par défaut (dev)'}`);
-  console.log(`  📬 Rappels  : Route /api/reminders/send active ✓`);
-  console.log(`  📱 SMS      : ${process.env.TWILIO_ACCOUNT_SID ? 'Twilio configuré ✓' : '⚠ Mode simulation (TWILIO_ACCOUNT_SID manquant)'}`);
-  console.log(`  ─────────────────────────────────\n`);
+  console.log(`✦ Hird Note Backend v2.0 — Port ${PORT}`);
+  startCronJob();
 });
-
-module.exports = app;
