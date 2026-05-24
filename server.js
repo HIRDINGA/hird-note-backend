@@ -17,7 +17,7 @@ console.log('[Config] POSTMARK_TOKEN:',  POSTMARK_TOKEN ? '✓ défini' : '✗ M
 console.log('[Config] BREVO_KEY:',       BREVO_KEY      ? '✓ défini' : '✗ MANQUANT');
 
 // ── CORS ───────────────────────────────────────────────────────────────
-app.use(cors({ origin: '*', credentials: true }));
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 // ── Supabase ───────────────────────────────────────────────────────────
