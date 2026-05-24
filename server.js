@@ -1,47 +1,56 @@
-// ═══════════════════════════════════════════════════════════════════════
-// HIRD NOTE BACKEND v2.0
-// Express + Supabase + Postmark + Brevo OTP
-// ═══════════════════════════════════════════════════════════════════════
-
 require('dotenv').config();
-const express  = require('express');
-const cors     = require('cors');
-const app      = express();
+const express = require('express');
+const cors    = require('cors');
+const app     = express();
+
+// ── Vérification des variables d'environnement ─────────────────────────
+const SUPABASE_URL   = process.env.SUPABASE_URL   || '';
+const SUPABASE_KEY   = process.env.SUPABASE_SERVICE_KEY || '';
+const POSTMARK_TOKEN = process.env.POSTMARK_TOKEN || '';
+const FROM_EMAIL     = process.env.FROM_EMAIL     || 'noreply@hird-tech.com';
+
+console.log('[Config] SUPABASE_URL:', SUPABASE_URL ? '✓ défini' : '✗ MANQUANT');
+console.log('[Config] SUPABASE_KEY:', SUPABASE_KEY ? '✓ défini' : '✗ MANQUANT');
+console.log('[Config] POSTMARK_TOKEN:', POSTMARK_TOKEN ? '✓ défini' : '✗ MANQUANT');
 
 // ── CORS ───────────────────────────────────────────────────────────────
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
-
-app.use(cors({
-  origin: function(origin, callback) {
-    // Permettre les requêtes sans origin (Postman, mobile, no-cors)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.length === 0) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    // Permettre tous les netlify.app par défaut
-    if (origin.endsWith('.netlify.app')) return callback(null, true);
-    if (origin.endsWith('.onrender.com')) return callback(null, true);
-    callback(null, true); // Permissif pour le développement
-  },
-  credentials: true,
-}));
-
+app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 
-// ── Supabase ───────────────────────────────────────────────────────────
-const { createClient } = require('@supabase/supabase-js');
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
+// ── Supabase (optionnel — ne plante pas si absent) ─────────────────────
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+  const { createClient } = require('@supabase/supabase-js');
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  console.log('[Config] Supabase connecté');
+} else {
+  console.warn('[Config] Supabase non configuré — rappels désactivés');
+}
 
-// ── Postmark ───────────────────────────────────────────────────────────
-const postmark = require('postmark');
-const postmarkClient = new postmark.ServerClient(process.env.POSTMARK_TOKEN);
-const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@hird-tech.com';
+// ── Postmark (optionnel — ne plante pas si absent) ─────────────────────
+let postmarkClient = null;
+if (POSTMARK_TOKEN) {
+  const postmark = require('postmark');
+  postmarkClient = new postmark.ServerClient(POSTMARK_TOKEN);
+  console.log('[Config] Postmark connecté');
+} else {
+  console.warn('[Config] Postmark non configuré — emails désactivés');
+}
 
 // ── Stockage OTP en mémoire ────────────────────────────────────────────
 const otpStore = new Map();
+
+// ══ ROUTE SANTÉ ══════════════════════════════════════════════════════════
+app.get('/', (req, res) => {
+  res.json({
+    status : 'ok',
+    service: 'Hird Note Backend v2.0',
+    config : {
+      supabase : !!supabase,
+      postmark : !!postmarkClient,
+    }
+  });
+});
 
 // ══ ROUTES OTP ══════════════════════════════════════════════════════════
 
@@ -51,11 +60,15 @@ app.post('/api/auth/send-otp', async (req, res) => {
     const { email, name, otp_override } = req.body;
     if (!email) return res.status(400).json({ success: false, message: 'Email requis' });
 
-    const code    = otp_override || Math.floor(100000 + Math.random() * 900000).toString();
-    const expiry  = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const code   = otp_override || Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = Date.now() + 10 * 60 * 1000;
     otpStore.set(email, { code, expiry });
 
-    // Envoyer via Postmark
+    if (!postmarkClient) {
+      console.warn('[OTP] Postmark non configuré — code:', code);
+      return res.json({ success: true, message: 'Code généré (email non envoyé — Postmark manquant)' });
+    }
+
     await postmarkClient.sendEmail({
       From   : FROM_EMAIL,
       To     : email,
@@ -65,24 +78,24 @@ app.post('/api/auth/send-otp', async (req, res) => {
           <div style="background:#1C1A16;border-radius:8px;padding:20px;text-align:center;margin-bottom:24px;">
             <div style="color:#C9A84C;font-size:22px;font-weight:700;letter-spacing:2px;">✦ HIRD NOTE</div>
           </div>
-          <p style="color:#333;">Bonjour <strong>${name || email}</strong>,</p>
-          <p style="color:#555;">Votre code de vérification est :</p>
+          <p>Bonjour <strong>${name || email}</strong>,</p>
+          <p>Votre code de vérification :</p>
           <div style="background:#f5f0e8;border:2px solid #C9A84C;border-radius:12px;padding:24px;text-align:center;margin:20px 0;">
             <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#1C1A16;">${code}</div>
           </div>
-          <p style="color:#888;font-size:13px;">Ce code expire dans 10 minutes. Ne le partagez jamais.</p>
-          <p style="color:#aaa;font-size:11px;margin-top:24px;">— Hird Note · Votre assistant de productivité</p>
+          <p style="color:#888;font-size:13px;">Expire dans 10 minutes.</p>
+          <p style="color:#aaa;font-size:11px;">— Hird Note</p>
         </div>`,
-      TextBody: `Bonjour ${name || email},\n\nVotre code Hird Note : ${code}\n\nExpire dans 10 minutes.\n\n— Hird Note`,
+      TextBody     : `Code Hird Note : ${code}\n\nExpire dans 10 minutes.`,
       MessageStream: 'outbound',
     });
 
-    console.log(`[OTP] Code envoyé à ${email}`);
+    console.log('[OTP] Envoyé à', email);
     res.json({ success: true, message: 'Code OTP envoyé' });
 
   } catch (err) {
-    console.error('[OTP] Erreur envoi:', err.message);
-    res.status(500).json({ success: false, message: 'Erreur envoi OTP: ' + err.message });
+    console.error('[OTP] Erreur:', err.message);
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -92,14 +105,12 @@ app.post('/api/auth/verify-otp', (req, res) => {
   if (!email || !otp) return res.status(400).json({ success: false, message: 'Email et OTP requis' });
 
   const record = otpStore.get(email);
-  if (!record) return res.json({ success: false, message: 'Code non trouvé ou expiré' });
+  if (!record)              return res.json({ success: false, message: 'Code non trouvé' });
   if (Date.now() > record.expiry) {
     otpStore.delete(email);
     return res.json({ success: false, message: 'Code expiré' });
   }
-  if (record.code !== otp.toString()) {
-    return res.json({ success: false, message: 'Code incorrect' });
-  }
+  if (record.code !== otp.toString()) return res.json({ success: false, message: 'Code incorrect' });
 
   otpStore.delete(email);
   const token = Buffer.from(`${email}:${Date.now()}`).toString('base64');
@@ -108,8 +119,9 @@ app.post('/api/auth/verify-otp', (req, res) => {
 
 // ══ ROUTES RAPPELS ══════════════════════════════════════════════════════
 
-// POST /api/reminders/schedule — programmer un rappel
+// POST /api/reminders/schedule
 app.post('/api/reminders/schedule', async (req, res) => {
+  if (!supabase) return res.status(503).json({ success: false, error: 'Supabase non configuré' });
   try {
     const {
       task_id, user_email, user_name, task_title,
@@ -128,15 +140,13 @@ app.post('/api/reminders/schedule', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Rappel déjà passé' });
     }
 
-    // Supprimer anciens rappels non envoyés pour cette tâche
     await supabase.from('scheduled_reminders')
       .delete().eq('task_id', task_id).eq('sent', false);
 
-    // Insérer le nouveau rappel
     const { data, error } = await supabase.from('scheduled_reminders')
       .insert({
         task_id, user_email, user_name, task_title, task_desc,
-        deadline: deadlineDate.toISOString(),
+        deadline     : deadlineDate.toISOString(),
         priority, progress,
         reminder_time: reminderDate.toISOString(),
         group_members
@@ -153,8 +163,11 @@ app.post('/api/reminders/schedule', async (req, res) => {
   }
 });
 
-// GET /api/reminders/process — traiter les rappels dus (cron)
+// GET /api/reminders/process
 app.get('/api/reminders/process', async (req, res) => {
+  if (!supabase || !postmarkClient) {
+    return res.status(503).json({ success: false, error: 'Service non configuré' });
+  }
   try {
     const now = new Date();
     const { data: reminders, error } = await supabase
@@ -166,82 +179,70 @@ app.get('/api/reminders/process', async (req, res) => {
 
     if (error) throw error;
     if (!reminders || reminders.length === 0) {
-      return res.json({ success: true, processed: 0, message: 'Aucun rappel dû' });
+      return res.json({ success: true, processed: 0 });
     }
 
-    console.log(`[Cron] ${reminders.length} rappel(s) à traiter`);
     let sent = 0;
-
-    for (const reminder of reminders) {
+    for (const r of reminders) {
       try {
-        const deadline    = new Date(reminder.deadline);
+        const deadline    = new Date(r.deadline);
         const diffMin     = Math.round((deadline - now) / 60000);
         const delayText   = diffMin >= 60 ? `${Math.round(diffMin/60)}h` : `${Math.max(0,diffMin)} min`;
         const deadlineStr = deadline.toLocaleString('fr-FR', {
           day:'2-digit', month:'long', year:'numeric',
           hour:'2-digit', minute:'2-digit'
         });
-
-        const recipients = [reminder.user_email];
-        if (reminder.group_members && reminder.group_members.length > 0) {
-          recipients.push(...reminder.group_members);
-        }
-
-        const priorityEmoji = { haute:'🔥', moyenne:'🟡', basse:'🟢' }[reminder.priority] || '🟡';
+        const emoji = { haute:'🔥', moyenne:'🟡', basse:'🟢' }[r.priority] || '🟡';
+        const recipients = [r.user_email, ...(r.group_members || [])];
 
         for (const email of recipients) {
-          const isOwner = email === reminder.user_email;
+          const isOwner = email === r.user_email;
           await postmarkClient.sendEmail({
             From   : FROM_EMAIL,
             To     : email,
-            Subject: `⏰ Rappel Hird Note — ${reminder.task_title}`,
+            Subject: `⏰ Rappel Hird Note — ${r.task_title}`,
             HtmlBody: `
-              <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08);">
-                <div style="background:#1C1A16;border-radius:8px;padding:20px;text-align:center;margin-bottom:20px;">
-                  <div style="color:#C9A84C;font-size:20px;font-weight:700;">✦ HIRD NOTE</div>
-                  <div style="background:#C4623A;color:#fff;border-radius:20px;padding:4px 14px;font-size:13px;display:inline-block;margin-top:8px;">⏰ Dans ${delayText}</div>
+              <div style="font-family:Arial;max-width:520px;margin:0 auto;padding:24px;background:#fff;border-radius:12px;">
+                <div style="background:#1C1A16;border-radius:8px;padding:16px;text-align:center;margin-bottom:20px;">
+                  <div style="color:#C9A84C;font-size:18px;font-weight:700;">✦ HIRD NOTE</div>
+                  <div style="background:#C4623A;color:#fff;border-radius:20px;padding:4px 12px;font-size:12px;display:inline-block;margin-top:6px;">⏰ Dans ${delayText}</div>
                 </div>
-                <p>Bonjour <strong>${isOwner ? reminder.user_name : 'Membre du groupe'}</strong>,</p>
-                ${!isOwner ? `<p style="color:#666;font-size:13px;">📋 Tâche créée par <strong>${reminder.user_name}</strong></p>` : ''}
-                <h2 style="color:#1C1A16;font-size:18px;margin:0 0 16px;">${reminder.task_title}</h2>
-                ${reminder.task_desc ? `<p style="color:#666;font-size:13px;">${reminder.task_desc}</p>` : ''}
-                <table style="width:100%;border-collapse:collapse;">
-                  <tr><td style="padding:8px 0;border-bottom:1px solid #f0f0f0;color:#888;font-size:13px;">📅 Échéance</td><td style="font-weight:600;font-size:13px;text-align:right;">${deadlineStr}</td></tr>
-                  <tr><td style="padding:8px 0;border-bottom:1px solid #f0f0f0;color:#888;font-size:13px;">⚡ Priorité</td><td style="font-weight:600;font-size:13px;text-align:right;">${priorityEmoji} ${reminder.priority}</td></tr>
-                  <tr><td style="padding:8px 0;color:#888;font-size:13px;">📊 Progression</td><td style="font-weight:600;font-size:13px;text-align:right;">${reminder.progress}%</td></tr>
-                </table>
-                <div style="background:#f0f0f0;border-radius:4px;height:8px;margin:12px 0;">
-                  <div style="background:#C9A84C;border-radius:4px;height:8px;width:${reminder.progress}%;"></div>
+                <p>Bonjour <strong>${isOwner ? r.user_name : 'Membre du groupe'}</strong>,</p>
+                ${!isOwner ? `<p style="color:#666;font-size:13px;">Tâche de <strong>${r.user_name}</strong></p>` : ''}
+                <h2 style="color:#1C1A16;font-size:18px;">${r.task_title}</h2>
+                ${r.task_desc ? `<p style="color:#666;">${r.task_desc}</p>` : ''}
+                <p>📅 <strong>${deadlineStr}</strong></p>
+                <p>${emoji} ${r.priority} | 📊 ${r.progress}%</p>
+                <div style="background:#f0f0f0;border-radius:4px;height:6px;margin:8px 0;">
+                  <div style="background:#C9A84C;border-radius:4px;height:6px;width:${r.progress}%;"></div>
                 </div>
-                <p style="color:#aaa;font-size:11px;text-align:center;margin-top:20px;">Hird Note · Votre assistant de productivité</p>
+                <p style="color:#aaa;font-size:11px;text-align:center;">Hird Note · Votre assistant de productivité</p>
               </div>`,
-            TextBody: `Rappel dans ${delayText} : "${reminder.task_title}"\nÉchéance : ${deadlineStr}\n\n— Hird Note`,
+            TextBody     : `Rappel dans ${delayText} : "${r.task_title}"\nÉchéance : ${deadlineStr}\n\n— Hird Note`,
             MessageStream: 'outbound',
           });
         }
 
         await supabase.from('scheduled_reminders')
           .update({ sent: true, sent_at: now.toISOString() })
-          .eq('id', reminder.id);
+          .eq('id', r.id);
 
         sent++;
-        console.log(`[Cron] ✓ Email(s) envoyé(s) pour: "${reminder.task_title}"`);
-
-      } catch (emailErr) {
-        console.error(`[Cron] Erreur pour ${reminder.id}:`, emailErr.message);
+        console.log(`[Cron] ✓ "${r.task_title}" → ${recipients.join(', ')}`);
+      } catch (e) {
+        console.error(`[Cron] Erreur ${r.id}:`, e.message);
       }
     }
-
     res.json({ success: true, processed: reminders.length, sent });
-
   } catch (err) {
-    console.error('[Cron] Erreur process:', err.message);
+    console.error('[Cron] Erreur:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // DELETE /api/reminders/cancel/:task_id
 app.delete('/api/reminders/cancel/:task_id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ success: false });
   try {
     await supabase.from('scheduled_reminders')
       .delete().eq('task_id', req.params.task_id).eq('sent', false);
@@ -251,30 +252,34 @@ app.delete('/api/reminders/cancel/:task_id', async (req, res) => {
   }
 });
 
-// POST /api/reminders/send — rappel immédiat (depuis frontend)
+// POST /api/reminders/send — rappel immédiat
 app.post('/api/reminders/send', async (req, res) => {
+  if (!postmarkClient) return res.status(503).json({ success: false, error: 'Postmark non configuré' });
   try {
     const { to, name, taskTitle, taskDesc, deadline, priority, progress, creator, minutesBefore } = req.body;
     if (!to || !taskTitle) return res.status(400).json({ success: false });
 
-    const priorityEmoji = { haute:'🔥', moyenne:'🟡', basse:'🟢' }[priority] || '🟡';
+    const emoji     = { haute:'🔥', moyenne:'🟡', basse:'🟢' }[priority] || '🟡';
     const delayText = minutesBefore ? `${minutesBefore} min` : 'maintenant';
 
     await postmarkClient.sendEmail({
       From   : FROM_EMAIL,
       To     : to,
       Subject: `⏰ Rappel Hird Note — ${taskTitle}`,
-      HtmlBody: `<div style="font-family:Arial;max-width:480px;margin:0 auto;padding:24px;">
-        <h2 style="color:#C9A84C;">⏰ Rappel Hird Note</h2>
-        <p>Bonjour <strong>${name || to}</strong>,</p>
-        ${creator ? `<p style="color:#666;font-size:13px;">Tâche de <strong>${creator}</strong></p>` : ''}
-        <h3>${taskTitle}</h3>
-        ${taskDesc ? `<p>${taskDesc}</p>` : ''}
-        <p>📅 Échéance : <strong>${deadline}</strong></p>
-        <p>${priorityEmoji} Priorité : ${priority} | 📊 ${progress}%</p>
-        <p style="color:#aaa;font-size:11px;">— Hird Note</p>
-      </div>`,
-      TextBody: `Rappel dans ${delayText} : "${taskTitle}"\nÉchéance : ${deadline}\n\n— Hird Note`,
+      HtmlBody: `
+        <div style="font-family:Arial;max-width:480px;margin:0 auto;padding:24px;background:#fff;border-radius:12px;">
+          <div style="background:#1C1A16;border-radius:8px;padding:16px;text-align:center;margin-bottom:20px;">
+            <div style="color:#C9A84C;font-size:18px;font-weight:700;">✦ HIRD NOTE</div>
+          </div>
+          <p>Bonjour <strong>${name || to}</strong>,</p>
+          ${creator ? `<p style="color:#666;font-size:13px;">Tâche de <strong>${creator}</strong></p>` : ''}
+          <h2 style="color:#1C1A16;">${taskTitle}</h2>
+          ${taskDesc ? `<p>${taskDesc}</p>` : ''}
+          <p>📅 Échéance : <strong>${deadline}</strong></p>
+          <p>${emoji} ${priority} | 📊 ${progress}%</p>
+          <p style="color:#aaa;font-size:11px;">— Hird Note</p>
+        </div>`,
+      TextBody     : `Rappel dans ${delayText} : "${taskTitle}"\nÉchéance : ${deadline}\n\n— Hird Note`,
       MessageStream: 'outbound',
     });
 
@@ -285,45 +290,32 @@ app.post('/api/reminders/send', async (req, res) => {
   }
 });
 
-// ── Route santé ────────────────────────────────────────────────────────
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Hird Note Backend v2.0' });
-});
-
-// ══ CRON JOB INTERNE (toutes les 60 secondes) ═══════════════════════════
-function startCronJob() {
-  console.log('[Cron] Démarré — vérification toutes les 60s');
-  setInterval(async () => {
-    try {
-      const now = new Date();
-      const { data: reminders } = await supabase
-        .from('scheduled_reminders')
-        .select('id')
-        .eq('sent', false)
-        .lte('reminder_time', now.toISOString())
-        .limit(1);
-
-      if (reminders && reminders.length > 0) {
-        // Appel interne à processReminders
-        const fakeReq = {};
-        const fakeRes = {
-          json: (d) => console.log('[Cron] Résultat:', JSON.stringify(d)),
-          status: (c) => ({ json: (d) => console.error('[Cron] Erreur:', d) })
-        };
-        // Appel direct à la logique process
-        const resp = await fetch(`http://localhost:${PORT}/api/reminders/process`);
-        const data = await resp.json();
-        if (data.sent > 0) console.log(`[Cron] ${data.sent} email(s) envoyé(s)`);
-      }
-    } catch (e) {
-      console.error('[Cron] Erreur tick:', e.message);
-    }
-  }, 60 * 1000);
-}
-
-// ── Démarrage ──────────────────────────────────────────────────────────
+// ══ CRON JOB INTERNE ═══════════════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✦ Hird Note Backend v2.0 — Port ${PORT}`);
-  startCronJob();
+
+  if (supabase && postmarkClient) {
+    console.log('[Cron] Démarrage — vérification toutes les 60s');
+    setInterval(async () => {
+      try {
+        const now = new Date();
+        const { data } = await supabase
+          .from('scheduled_reminders')
+          .select('id')
+          .eq('sent', false)
+          .lte('reminder_time', now.toISOString())
+          .limit(1);
+
+        if (data && data.length > 0) {
+          const resp = await fetch(`http://localhost:${PORT}/api/reminders/process`);
+          const result = await resp.json();
+          if (result.sent > 0) console.log(`[Cron] ${result.sent} email(s) envoyé(s)`);
+        }
+      } catch (e) {
+        console.error('[Cron] Erreur:', e.message);
+      }
+    }, 60000);
+  }
 });
+
