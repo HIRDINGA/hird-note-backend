@@ -9,7 +9,7 @@ const SUPABASE_URL   = process.env.SUPABASE_URL   || '';
 const SUPABASE_KEY   = process.env.SUPABASE_SERVICE_KEY || '';
 const POSTMARK_TOKEN = process.env.POSTMARK_TOKEN || '';
 const FROM_EMAIL     = process.env.FROM_EMAIL     || 'noreply@hird-tech.com';
-const BREVO_KEY      = process.env.BREVO_API_KEY  || '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';
+const BREVO_KEY      = process.env.BREVO_API_KEY  || '';
 
 console.log('[Config] SUPABASE_URL:',    SUPABASE_URL   ? '✓ défini' : '✗ MANQUANT');
 console.log('[Config] SUPABASE_KEY:',    SUPABASE_KEY   ? '✓ défini' : '✗ MANQUANT');
