@@ -37,12 +37,51 @@ if (POSTMARK_TOKEN) {
 }
 
 // ── Brevo (OTP) ────────────────────────────────────────────────────────
-function sendBrevoEmail(to, toName, subject, htmlContent, textContent) {
+// ── Envoi email via Postmark ──────────────────────────────────────────
+function sendViaPostmark(to, toName, subject, htmlContent, textContent) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
-      sender    : { name: 'Hird Note', email: FROM_EMAIL },
-      to        : [{ email: to, name: toName || to }],
-      subject   : subject,
+      From         : FROM_EMAIL,
+      To           : to,
+      Subject      : subject,
+      HtmlBody     : htmlContent,
+      TextBody     : textContent || '',
+      MessageStream: 'outbound',
+    });
+    const options = {
+      hostname: 'api.postmarkapp.com',
+      path    : '/email',
+      method  : 'POST',
+      headers : {
+        'Content-Type'         : 'application/json',
+        'X-Postmark-Server-Token': POSTMARK_TOKEN,
+        'Content-Length'       : Buffer.byteLength(body),
+      }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve({ success: true, provider: 'postmark' });
+        } else {
+          reject(new Error('Postmark erreur ' + res.statusCode + ': ' + data));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Envoi email via Brevo ────────────────────────────────────────────
+function sendViaBrevo(to, toName, subject, htmlContent, textContent) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      sender     : { name: 'Hird Note', email: FROM_EMAIL },
+      to         : [{ email: to, name: toName || to }],
+      subject    : subject,
       htmlContent: htmlContent,
       textContent: textContent,
     });
@@ -61,9 +100,9 @@ function sendBrevoEmail(to, toName, subject, htmlContent, textContent) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         if (res.statusCode >= 200 && res.statusCode < 300) {
-          resolve({ success: true });
+          resolve({ success: true, provider: 'brevo' });
         } else {
-          reject(new Error(`Brevo erreur ${res.statusCode}: ${data}`));
+          reject(new Error('Brevo erreur ' + res.statusCode + ': ' + data));
         }
       });
     });
@@ -71,6 +110,27 @@ function sendBrevoEmail(to, toName, subject, htmlContent, textContent) {
     req.write(body);
     req.end();
   });
+}
+
+// ── Envoi email — Postmark d'abord, Brevo en fallback ────────────────
+async function sendBrevoEmail(to, toName, subject, htmlContent, textContent) {
+  // Essayer Postmark en premier (déjà approuvé, domaine vérifié)
+  if (POSTMARK_TOKEN) {
+    try {
+      const result = await sendViaPostmark(to, toName, subject, htmlContent, textContent);
+      console.log('[Email] Envoyé via Postmark à', to);
+      return result;
+    } catch(e) {
+      console.warn('[Email] Postmark échoué:', e.message, '— tentative Brevo');
+    }
+  }
+  // Fallback Brevo
+  if (BREVO_KEY) {
+    const result = await sendViaBrevo(to, toName, subject, htmlContent, textContent);
+    console.log('[Email] Envoyé via Brevo à', to);
+    return result;
+  }
+  throw new Error('Aucun service email configuré (Postmark + Brevo absents)');
 }
 
 // ── Stockage OTP ───────────────────────────────────────────────────────
