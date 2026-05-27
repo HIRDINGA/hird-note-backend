@@ -214,14 +214,8 @@ app.post('/api/auth/verify-otp', (req, res) => {
 
 // Fonction d'envoi email rappel (Postmark si dispo, sinon Brevo)
 async function sendReminderEmail(to, subject, html, text) {
-  if (postmarkClient) {
-    await postmarkClient.sendEmail({
-      From: FROM_EMAIL, To: to, Subject: subject,
-      HtmlBody: html, TextBody: text, MessageStream: 'outbound',
-    });
-  } else {
-    await sendBrevoEmail(to, to, subject, html, text);
-  }
+  // Utilise sendBrevoEmail : Postmark d'abord, Brevo en fallback
+  await sendBrevoEmail(to, to, subject, html, text);
 }
 
 // POST /api/reminders/schedule
