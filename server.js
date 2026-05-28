@@ -114,32 +114,16 @@ function sendViaBrevo(to, toName, subject, htmlContent, textContent) {
 
 // ── Envoi email — Postmark d'abord, Brevo en fallback ────────────────
 async function sendBrevoEmail(to, toName, subject, htmlContent, textContent) {
-  console.log('[Email] Tentative envoi à', to);
-  console.log('[Email] POSTMARK_TOKEN:', POSTMARK_TOKEN ? 'défini' : 'absent');
-  console.log('[Email] BREVO_KEY:', BREVO_KEY ? 'défini' : 'absent');
-
-  // Essayer Postmark en premier
-  if (POSTMARK_TOKEN) {
-    try {
-      const result = await sendViaPostmark(to, toName, subject, htmlContent, textContent);
-      console.log('[Email] ✓ Envoyé via Postmark à', to);
-      return result;
-    } catch(e) {
-      console.warn('[Email] Postmark échoué:', e.message, '→ tentative Brevo');
-    }
+  // Brevo uniquement — Postmark en sandbox (inutilisable pour emails externes)
+  if (!BREVO_KEY) throw new Error('BREVO_API_KEY non configurée');
+  try {
+    const result = await sendViaBrevo(to, toName, subject, htmlContent, textContent);
+    console.log('[Email] ✓ Envoyé via Brevo à', to);
+    return result;
+  } catch(e) {
+    console.error('[Email] ✗ Brevo échoué pour', to, ':', e.message);
+    throw e;
   }
-  // Fallback Brevo
-  if (BREVO_KEY) {
-    try {
-      const result = await sendViaBrevo(to, toName, subject, htmlContent, textContent);
-      console.log('[Email] ✓ Envoyé via Brevo à', to);
-      return result;
-    } catch(e) {
-      console.error('[Email] Brevo échoué:', e.message);
-      throw e;
-    }
-  }
-  throw new Error('Aucun service email configuré');
 }
 
 // ── Stockage OTP ───────────────────────────────────────────────────────
