@@ -384,16 +384,66 @@ app.listen(PORT, () => {
     setInterval(async () => {
       try {
         const now = new Date();
-        const { data } = await supabase
+        console.log('[Cron] Vérification rappels à', now.toISOString());
+
+        const { data: reminders, error } = await supabase
           .from('scheduled_reminders')
-          .select('id')
+          .select('*')
           .eq('sent', false)
           .lte('reminder_time', now.toISOString())
-          .limit(1);
-        if (data && data.length > 0) {
-          const resp = await fetch(`http://localhost:${PORT}/api/reminders/process`);
-          const result = await resp.json();
-          if (result.sent > 0) console.log(`[Cron] ${result.sent} email(s) envoyé(s)`);
+          .limit(50);
+
+        if (error) { console.error('[Cron] Erreur Supabase:', error.message); return; }
+        if (!reminders || reminders.length === 0) {
+          console.log('[Cron] Aucun rappel dû');
+          return;
+        }
+
+        console.log('[Cron]', reminders.length, 'rappel(s) à traiter');
+
+        for (const r of reminders) {
+          try {
+            const deadline    = new Date(r.deadline);
+            const diffMin     = Math.round((deadline - now) / 60000);
+            const delayText   = diffMin >= 60 ? Math.round(diffMin/60) + 'h' : Math.max(0,diffMin) + ' min';
+            const deadlineStr = deadline.toLocaleString('fr-FR', {
+              day:'2-digit', month:'long', year:'numeric',
+              hour:'2-digit', minute:'2-digit'
+            });
+            const emoji      = { haute:'🔥', moyenne:'🟡', basse:'🟢' }[r.priority] || '🟡';
+            const recipients = [r.user_email, ...(r.group_members || [])];
+
+            for (const email of recipients) {
+              const isOwner = email === r.user_email;
+              const html = '<div style="font-family:Arial;max-width:520px;margin:0 auto;padding:24px;">' +
+                '<div style="background:#1C1A16;border-radius:8px;padding:16px;text-align:center;margin-bottom:20px;">' +
+                '<div style="color:#C9A84C;font-size:18px;font-weight:700;">✦ HIRD NOTE</div>' +
+                '<div style="background:#C4623A;color:#fff;border-radius:20px;padding:4px 12px;font-size:12px;display:inline-block;margin-top:6px;">⏰ Dans ' + delayText + '</div>' +
+                '</div>' +
+                '<p>Bonjour <strong>' + (isOwner ? r.user_name : 'Membre du groupe') + '</strong>,</p>' +
+                '<h2 style="color:#1C1A16;">' + r.task_title + '</h2>' +
+                (r.task_desc ? '<p>' + r.task_desc + '</p>' : '') +
+                '<p>📅 <strong>' + deadlineStr + '</strong></p>' +
+                '<p>' + emoji + ' ' + r.priority + ' | 📊 ' + r.progress + '%</p>' +
+                '<p style="color:#aaa;font-size:11px;text-align:center;">Hird Note · Votre assistant de productivité</p>' +
+                '</div>';
+
+              await sendReminderEmail(
+                email,
+                '⏰ Rappel Hird Note — ' + r.task_title,
+                html,
+                'Rappel dans ' + delayText + ' : "' + r.task_title + '"\nÉchéance : ' + deadlineStr + '\n\n— Hird Note'
+              );
+              console.log('[Cron] ✓ Email envoyé à', email, 'pour:', r.task_title);
+            }
+
+            await supabase.from('scheduled_reminders')
+              .update({ sent: true, sent_at: now.toISOString() })
+              .eq('id', r.id);
+
+          } catch(emailErr) {
+            console.error('[Cron] Erreur email pour', r.task_title, ':', emailErr.message);
+          }
         }
       } catch (e) {
         console.error('[Cron] Erreur tick:', e.message);
