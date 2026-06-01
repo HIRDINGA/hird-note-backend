@@ -20,6 +20,12 @@ console.log('[Config] BREVO_KEY:',       BREVO_KEY      ? '✓ défini' : '✗ M
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// Log toutes les requêtes entrantes
+app.use((req, res, next) => {
+  console.log('[REQ]', req.method, req.path, '— Origin:', req.headers.origin || 'direct');
+  next();
+});
+
 // ── Supabase ───────────────────────────────────────────────────────────
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_KEY) {
