@@ -269,6 +269,65 @@ app.post('/api/reminders/schedule', async (req, res) => {
   }
 });
 
+
+// GET /api/reminders/schedule-get — via image pixel (contourne SW/CORS)
+app.get('/api/reminders/schedule-get', async (req, res) => {
+  // Répondre immédiatement avec une image 1x1 transparente
+  const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+  res.writeHead(200, {
+    'Content-Type' : 'image/gif',
+    'Content-Length': pixel.length,
+    'Cache-Control' : 'no-store',
+    'Access-Control-Allow-Origin': '*'
+  });
+  res.end(pixel);
+
+  // Traiter le rappel en arrière-plan
+  if (!supabase) return;
+  try {
+    const q = req.query;
+    console.log('[Schedule-GET] Reçu:', q.task_title, 'pour:', q.user_email);
+
+    if (!q.task_id || !q.user_email || !q.task_title || !q.deadline || !q.reminder_minutes) {
+      console.warn('[Schedule-GET] Champs manquants');
+      return;
+    }
+
+    const deadlineDate  = new Date(q.deadline);
+    const reminderDate  = new Date(deadlineDate.getTime() - parseInt(q.reminder_minutes) * 60 * 1000);
+
+    if (reminderDate <= new Date()) {
+      console.warn('[Schedule-GET] Rappel déjà passé');
+      return;
+    }
+
+    // Supprimer anciens rappels non envoyés
+    await supabase.from('scheduled_reminders')
+      .delete().eq('task_id', q.task_id).eq('sent', false);
+
+    // Insérer le nouveau rappel
+    const { data, error } = await supabase.from('scheduled_reminders')
+      .insert({
+        task_id      : q.task_id,
+        user_email   : q.user_email,
+        user_name    : q.user_name    || 'Utilisateur',
+        task_title   : q.task_title,
+        task_desc    : q.task_desc    || '',
+        deadline     : deadlineDate.toISOString(),
+        priority     : q.priority     || 'moyenne',
+        progress     : parseInt(q.progress) || 0,
+        reminder_time: reminderDate.toISOString(),
+        group_members: q.group_members ? JSON.parse(q.group_members) : []
+      }).select().single();
+
+    if (error) { console.error('[Schedule-GET] Supabase erreur:', error.message); return; }
+    console.log('[Schedule-GET] ✓ Rappel enregistré id:', data.id, 'à:', reminderDate.toISOString());
+
+  } catch(err) {
+    console.error('[Schedule-GET] Erreur:', err.message);
+  }
+});
+
 // GET /api/reminders/process
 app.get('/api/reminders/process', async (req, res) => {
   if (!supabase) return res.status(503).json({ success: false, error: 'Supabase non configuré' });
