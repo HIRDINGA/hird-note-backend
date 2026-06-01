@@ -213,6 +213,7 @@ async function sendReminderEmail(to, subject, html, text) {
 
 // POST /api/reminders/schedule
 app.post('/api/reminders/schedule', async (req, res) => {
+  console.log('[Schedule] Requête reçue:', JSON.stringify(req.body).slice(0,200));
   if (!supabase) return res.status(503).json({ success: false, error: 'Supabase non configuré' });
   try {
     const {
@@ -221,8 +222,17 @@ app.post('/api/reminders/schedule', async (req, res) => {
       progress = 0, reminder_minutes, group_members = []
     } = req.body;
 
+    console.log('[Schedule] task_id:', task_id, 'email:', user_email, 'deadline:', deadline, 'reminder_minutes:', reminder_minutes);
+
     if (!task_id || !user_email || !task_title || !deadline || !reminder_minutes) {
-      return res.status(400).json({ success: false, error: 'Champs manquants' });
+      const missing = [];
+      if (!task_id) missing.push('task_id');
+      if (!user_email) missing.push('user_email');
+      if (!task_title) missing.push('task_title');
+      if (!deadline) missing.push('deadline');
+      if (!reminder_minutes) missing.push('reminder_minutes');
+      console.warn('[Schedule] Champs manquants:', missing.join(', '));
+      return res.status(400).json({ success: false, error: 'Champs manquants: ' + missing.join(', ') });
     }
 
     const deadlineDate = new Date(deadline);
